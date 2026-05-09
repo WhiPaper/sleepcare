@@ -494,9 +494,7 @@ ScWsServer* sc_ws_create(int port, const char* cert_path, const char* key_path,
     info.mounts    = &kMount;
     info.ssl_cert_filepath        = cert_path;
     info.ssl_private_key_filepath = key_path;
-    info.options   = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT | 
-                     LWS_SERVER_OPTION_PEER_CERT_NOT_REQUIRED |
-                     LWS_SERVER_OPTION_ALLOW_NON_SSL_ON_SSL_PORT;
+    info.options   = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
     info.gid       = -1;
     info.uid       = -1;
 
