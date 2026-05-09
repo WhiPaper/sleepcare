@@ -49,6 +49,12 @@ typedef struct {
     int64_t    last_rx_ms;
     int64_t    last_ping_sent_ms;
     bool       ping_outstanding;
+    int64_t    established_ms;
+    int64_t    hello_done_ms;
+    int64_t    session_open_ms;
+    bool       summary_pending;
+    int64_t    summary_pending_ms;
+    bool       close_after_summary;
 } ConnCtx;
 
 /* ── Server context ─────────────────────────────────────────────────── */
@@ -65,6 +71,13 @@ struct ScWsServer {
 };
 
 static ScWsServer* g_srv = NULL;  /* single global for LWS callback */
+
+/* Canonical session-summary reasons */
+static const char* kReasonUserStop           = "user_stop";
+static const char* kReasonPingTimeout        = "ping_timeout";
+static const char* kReasonHelloTimeout       = "hello_timeout";
+static const char* kReasonSessionOpenTimeout = "session_open_timeout";
+static const char* kReasonSummaryWriteTimeout= "summary_write_timeout";
 
 static void send_ui_state_frame(uint8_t state, uint8_t alert_level, uint8_t qr_ready,
                                 float eye_score, float fused_score, uint16_t hr_bpm) {
@@ -139,6 +152,7 @@ static void handle_hello(struct lws* wsi, ConnCtx* conn, const char* body_raw) {
         cJSON_Delete(root);
     }
     conn->session.hello_done = true;
+    conn->hello_done_ms = (int64_t)time(NULL) * 1000;
 
     const char* mode = conn->session.watch_available ? "eye+hr" : "eye-only";
     char body[256];
@@ -147,17 +161,20 @@ static void handle_hello(struct lws* wsi, ConnCtx* conn, const char* body_raw) {
              SC_DEVICE_ID, mode);
     send_envelope(wsi, conn, T_HELLO_ACK, body, false);
 
-    /* Handshake complete: hide QR overlay and start UI sync timer */
-    g_srv->qr_ready = 0;
+    /* HELLO only syncs capabilities; QR is hidden on session.open. */
     send_ui_state_frame((uint8_t)SC_STATE_IDLE, 0, g_srv->qr_ready, 0.0f, 0.0f, 0);
     lws_set_timer_usecs(wsi, SC_RISK_INTERVAL_MS * 1000);
 }
 
 static void handle_session_open(struct lws* wsi, ConnCtx* conn, ScEnvelope* env,
                                   const char* body_raw) {
+    session_reset(&conn->session);
     snprintf(conn->session.sid, sizeof(conn->session.sid), "%s", env->sid);
     conn->session.session_open = true;
-    session_reset(&conn->session);
+    conn->session_open_ms = (int64_t)time(NULL) * 1000;
+    conn->summary_pending = false;
+    conn->summary_pending_ms = 0;
+    conn->close_after_summary = false;
 
     cJSON* body = cJSON_Parse(body_raw ? body_raw : "{}");
     if (body) {
@@ -201,7 +218,7 @@ static void handle_session_close(struct lws* wsi, ConnCtx* conn, const char* bod
     conn->session.state = SS_CLOSING;
 
     /* Parse reason */
-    const char* reason = "user_stop";
+    const char* reason = kReasonUserStop;
     cJSON* root = cJSON_Parse(body_raw ? body_raw : "{}");
     if (root) {
         cJSON* r = cJSON_GetObjectItemCaseSensitive(root, "reason");
@@ -226,6 +243,12 @@ static void handle_session_close(struct lws* wsi, ConnCtx* conn, const char* bod
 
     if (root) cJSON_Delete(root);
     send_envelope(wsi, conn, T_SESSION_SUMM, body, false);
+    conn->summary_pending = true;
+    conn->summary_pending_ms = (int64_t)time(NULL) * 1000;
+
+    /* Mark session as closed so timer ticks return to pre-session path. */
+    conn->session.session_open = false;
+    conn->session.state = SS_IDLE;
 
     /* Session intentionally closed: show QR again for next pairing. */
     g_srv->qr_ready = 1;
@@ -240,8 +263,46 @@ static void handle_session_close(struct lws* wsi, ConnCtx* conn, const char* bod
 static bool do_risk_tick(struct lws* wsi, ConnCtx* conn) {
     int64_t now_ms = (int64_t)time(NULL) * 1000;
 
+    if (conn->close_after_summary) {
+        if (!conn->summary_pending) {
+            printf("[sleepcare-pi] session.summary flushed, closing websocket\n");
+            return false;
+        }
+        if (conn->summary_pending_ms > 0 &&
+            (now_ms - conn->summary_pending_ms) > (int64_t)SC_SUMMARY_TIMEOUT_MS) {
+            printf("[sleepcare-pi] %s (%d ms), closing\n",
+                   kReasonSummaryWriteTimeout, SC_SUMMARY_TIMEOUT_MS);
+            return false;
+        }
+        return true;
+    }
+
+    if (!conn->session.hello_done &&
+        (now_ms - conn->established_ms) > (int64_t)SC_HELLO_TIMEOUT_MS) {
+        printf("[sleepcare-pi] %s (%d ms), closing\n",
+               kReasonHelloTimeout, SC_HELLO_TIMEOUT_MS);
+        return false;
+    }
+
+    if (conn->session.hello_done && !conn->session.session_open &&
+        conn->hello_done_ms > 0 &&
+        (now_ms - conn->hello_done_ms) > (int64_t)SC_SESSION_TIMEOUT_MS) {
+        printf("[sleepcare-pi] %s (%d ms), closing\n",
+               kReasonSessionOpenTimeout, SC_SESSION_TIMEOUT_MS);
+        return false;
+    }
+
     if (conn->last_rx_ms > 0 &&
         (now_ms - conn->last_rx_ms) > (int64_t)SC_PING_TIMEOUT_SEC * 1000) {
+        if (conn->session.session_open) {
+            printf("[sleepcare-pi] websocket ping timeout (%d sec), closing after summary\n", SC_PING_TIMEOUT_SEC);
+            char close_body[64];
+            snprintf(close_body, sizeof(close_body),
+                     "{\"reason\":\"%s\"}", kReasonPingTimeout);
+            handle_session_close(wsi, conn, close_body);
+            conn->close_after_summary = true;
+            return true;
+        }
         printf("[sleepcare-pi] websocket ping timeout (%d sec), closing\n", SC_PING_TIMEOUT_SEC);
         return false;
     }
@@ -305,6 +366,12 @@ static bool do_risk_tick(struct lws* wsi, ConnCtx* conn) {
 
     SessionState prev  = conn->session.state;
     SessionState state = session_tick(&conn->session, fused, hr_w, 1.0 /* 1s */);
+    if (state != prev) {
+        printf("[core][state] %s -> %s fused=%.3f eye=%.3f hr_w=%.2f\n",
+               session_state_name(prev),
+               session_state_name(state),
+               fused, eye_score, hr_w);
+    }
 
     /* Build risk.update */
     bool alerting_transition = (state == SS_ALERTING && prev != SS_ALERTING);
@@ -376,6 +443,12 @@ static int sc_ws_callback(struct lws* wsi, enum lws_callback_reasons reason,
         conn->last_rx_ms = (int64_t)time(NULL) * 1000;
         conn->last_ping_sent_ms = conn->last_rx_ms;
         conn->ping_outstanding = false;
+        conn->established_ms = conn->last_rx_ms;
+        conn->hello_done_ms = 0;
+        conn->session_open_ms = 0;
+        conn->summary_pending = false;
+        conn->summary_pending_ms = 0;
+        conn->close_after_summary = false;
         printf("[sleepcare-pi] websocket client connected path=/ws\n");
         break;
 
@@ -448,6 +521,10 @@ static int sc_ws_callback(struct lws* wsi, enum lws_callback_reasons reason,
                msg_len,
                w,
                conn->send_queue.count);
+          if (w >= 0 && _t && strcmp(_t, T_SESSION_SUMM) == 0) {
+              conn->summary_pending = false;
+              conn->summary_pending_ms = 0;
+          }
         free(out);
 
         if (conn->send_queue.count > 0)
