@@ -41,7 +41,6 @@ static bool buzzer_enable(unsigned int freq_hz) {
     if (freq_hz == 0) return write_pwm_attr("enable", 0);
     unsigned int period_ns = (unsigned int)(1000000000ULL / freq_hz);
     unsigned int duty_ns = period_ns / 2;
-    if (!write_pwm_attr("enable", 0)) return false;
     if (!write_pwm_attr("period", period_ns)) return false;
     if (!write_pwm_attr("duty_cycle", duty_ns)) return false;
     return write_pwm_attr("enable", 1);
