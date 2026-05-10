@@ -189,8 +189,6 @@ static void handle_session_open(struct lws* wsi, ConnCtx* conn, ScEnvelope* env,
     g_srv->active_wsi  = wsi;
     g_srv->active_conn = conn;
 
-    /* Pairing/session established: hide QR overlay immediately. */
-    g_srv->qr_ready = 0;
     send_ui_state_frame((uint8_t)SC_STATE_BASELINE, 0, g_srv->qr_ready,
                         0.0f, 0.0f, 0);
 
@@ -253,11 +251,6 @@ static void handle_session_close(struct lws* wsi, ConnCtx* conn, const char* bod
     /* Mark session as closed so timer ticks return to pre-session path. */
     conn->session.session_open = false;
     conn->session.state = SS_IDLE;
-
-    /* Session intentionally closed: show QR again for next pairing. */
-    g_srv->qr_ready = 1;
-    send_ui_state_frame((uint8_t)SC_STATE_IDLE, 0, g_srv->qr_ready,
-                        0.0f, 0.0f, 0);
 
     g_srv->active_wsi  = NULL;
     g_srv->active_conn = NULL;
@@ -403,6 +396,9 @@ static int sc_ws_callback(struct lws* wsi, enum lws_callback_reasons reason,
         memset(&conn->send_queue, 0, sizeof(conn->send_queue));
         conn->session_open_ms = 0;
         conn->summary_pending = false;
+        g_srv->qr_ready = 0;
+        send_ui_state_frame((uint8_t)SC_STATE_IDLE, 0, g_srv->qr_ready,
+                            0.0f, 0.0f, 0);
         printf("[sleepcare-pi] websocket client connected path=/ws\n");
         break;
 
@@ -493,11 +489,9 @@ static int sc_ws_callback(struct lws* wsi, enum lws_callback_reasons reason,
             g_srv->active_wsi  = NULL;
             g_srv->active_conn = NULL;
         }
-        if (g_srv->qr_ready == 0) {
-            g_srv->qr_ready = 1;
-            send_ui_state_frame((uint8_t)SC_STATE_IDLE, 0, g_srv->qr_ready,
-                                0.0f, 0.0f, 0);
-        }
+        g_srv->qr_ready = 1;
+        send_ui_state_frame((uint8_t)SC_STATE_IDLE, 0, g_srv->qr_ready,
+                            0.0f, 0.0f, 0);
         break;
 
     default:
