@@ -506,24 +506,6 @@ static struct lws_protocols kProtocols[] = {
     LWS_PROTOCOL_LIST_TERM
 };
 
-static const struct lws_http_mount kMount = {
-    .mount_next       = NULL,
-    .mountpoint       = SC_WS_PATH,
-    .origin           = NULL,
-    .def              = NULL,
-    .protocol         = "sleepcare-v1",
-    .cgienv           = NULL,
-    .extra_mimetypes  = NULL,
-    .interpret        = NULL,
-    .cgi_timeout      = 0,
-    .cache_max_age    = 0,
-    .auth_mask        = 0,
-    .cache_intermediaries = 0,
-    .origin_protocol  = LWSMPRO_CALLBACK,
-    .mountpoint_len   = sizeof(SC_WS_PATH) - 1,
-    .basic_auth_login_file = NULL,
-};
-
 ScWsServer* sc_ws_create(int port, const char* cert_path, const char* key_path,
                           int eye_fd, int risk_fd) {
     ScWsServer* srv = (ScWsServer*)calloc(1, sizeof(ScWsServer));
@@ -536,7 +518,27 @@ ScWsServer* sc_ws_create(int port, const char* cert_path, const char* key_path,
     struct lws_context_creation_info info = {0};
     info.port      = port;
     info.protocols = kProtocols;
-    info.mounts    = &kMount;
+    const char* ws_path = SC_WS_PATH;
+    size_t ws_path_len = strlen(ws_path);
+    if (ws_path_len > 255) ws_path_len = 255;
+    struct lws_http_mount mount = {
+        .mount_next       = NULL,
+        .mountpoint       = ws_path,
+        .origin           = NULL,
+        .def              = NULL,
+        .protocol         = "sleepcare-v1",
+        .cgienv           = NULL,
+        .extra_mimetypes  = NULL,
+        .interpret        = NULL,
+        .cgi_timeout      = 0,
+        .cache_max_age    = 0,
+        .auth_mask        = 0,
+        .cache_intermediaries = 0,
+        .origin_protocol  = LWSMPRO_CALLBACK,
+        .mountpoint_len   = (unsigned char)ws_path_len,
+        .basic_auth_login_file = NULL,
+    };
+    info.mounts    = &mount;
     info.ssl_cert_filepath        = cert_path;
     info.ssl_private_key_filepath = key_path;
     info.options   = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;

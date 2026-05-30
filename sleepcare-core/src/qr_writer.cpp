@@ -17,6 +17,7 @@
  */
 
 bool sc_qr_write(const char* spki_sha256, int port, const char* out_path) {
+    (void)port;
     /* Build JSON payload */
     int64_t now_ms = (int64_t)time(NULL) * 1000;
     cJSON* root = cJSON_CreateObject();
