@@ -27,8 +27,6 @@ int main(void) {
         return 1;
     }
 
-    lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_180);
-
     if (lv_linux_drm_set_file(disp, "/dev/dri/card2", -1) != LV_RESULT_OK) {
         std::fprintf(stderr, "[clock] ERROR: failed to open DRM device\n");
         return 1;
